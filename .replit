@@ -40,8 +40,3 @@ externalPort = 3001
 [[ports]]
 localPort = 46053
 externalPort = 3000
-
-[userenv]
-
-[userenv.shared]
-BLOCK_URL = "https://www.gov.br/pt-br"
