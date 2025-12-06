@@ -29,7 +29,11 @@ def validate_token(provided, expected):
 
 @app.before_request
 def cloaker_check():
-    """Verificar acesso com cloaker"""
+    """Verificar acesso com cloaker
+    Suporta:
+    1. ?creative=meta_ads_2025_X9k7f2qR8vUe4ZsB1tL0
+    2. ?utm_source=FB&utm_campaign=...&utm_medium=...&creative=meta_ads_2025_X9k7f2qR8vUe4ZsB1tL0
+    """
     path = request.path
     
     # Em Replit, permitir acesso livre
@@ -45,12 +49,26 @@ def cloaker_check():
         print(f"[CLOAKER] Cookie válido - Acesso permitido")
         return None
     
-    # Verificar parâmetro creative
+    # Verificar parâmetro creative (com ou sem UTM)
     creative = request.args.get('creative', '').strip()
+    
+    # Log dos parâmetros recebidos
+    utm_params = {
+        'utm_source': request.args.get('utm_source'),
+        'utm_campaign': request.args.get('utm_campaign'),
+        'utm_medium': request.args.get('utm_medium'),
+        'utm_content': request.args.get('utm_content'),
+        'utm_term': request.args.get('utm_term'),
+    }
+    utm_params = {k: v for k, v in utm_params.items() if v}  # Remover None
+    
     if creative:
         if TOKEN_OFFER and validate_token(creative, TOKEN_OFFER):
-            print(f"[CLOAKER] Token válido - Criando cookie e redirecionando")
-            # Redirecionar para / (sem parâmetro)
+            print(f"[CLOAKER] Token válido - Creative: {creative}")
+            if utm_params:
+                print(f"[CLOAKER] Parâmetros UTM recebidos: {utm_params}")
+            
+            # Criar cookie e redirecionar para /
             from flask import Response
             resp = Response()
             resp.status_code = 302
