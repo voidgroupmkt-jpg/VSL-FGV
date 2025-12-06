@@ -1,84 +1,83 @@
 import os
-from flask import Flask, render_template, jsonify, request, redirect
-from cloaker import (
-    init_cloaker, is_replit_environment, validate_token, 
-    set_auth_cookie, get_env_secrets, COOKIE_NAME, COOKIE_VALUE
-)
+from flask import Flask, render_template, jsonify, request, redirect, make_response
+import hmac
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SESSION_SECRET")
 
-# Inicializar cloaker se TOKEN_OFFER ou BLOCK_URL estiverem configurados
-token_offer = os.environ.get("TOKEN_OFFER")
-block_url = os.environ.get("BLOCK_URL")
-if token_offer or block_url:
-    init_cloaker(token_offer, block_url)
+# Constantes do cloaker
+COOKIE_NAME = "creative_session"
+COOKIE_VALUE = "authorized"
+COOKIE_MAX_AGE = 3 * 60 * 60  # 3 horas
 
+# Secrets
+TOKEN_OFFER = os.environ.get("TOKEN_OFFER")
+BLOCK_URL = os.environ.get("BLOCK_URL", "https://www.gov.br/pt-br")
+
+def is_replit_env():
+    """Verificar se está em Replit"""
+    return bool(os.environ.get("REPL_ID") or os.environ.get("REPL_SLUG"))
+
+def validate_token(provided, expected):
+    """Validar token com timing-safe comparison"""
+    if not provided or not expected:
+        return False
+    try:
+        return hmac.compare_digest(str(provided), str(expected))
+    except:
+        return False
 
 @app.before_request
-def apply_cloaker():
-    """Aplicar cloaker antes de cada request"""
+def cloaker_check():
+    """Verificar acesso com cloaker"""
     path = request.path
     
-    # Se em desenvolvimento (Replit), permitir acesso livre
-    if is_replit_environment():
+    # Em Replit, permitir acesso livre
+    if is_replit_env():
         return None
     
-    # Permitir debug endpoint
-    if path == '/debug':
+    # Permitir rotas específicas
+    if path in ['/debug', '/favicon.ico'] or path.startswith(('/static/', '/api/', '/assets/')):
         return None
     
-    # Ignorar rotas estáticas e API
-    if path.startswith(('/static/', '/api/', '/assets/', '/fonts/')) or path in ['/favicon.ico', '/robots.txt']:
-        return None
-    
-    secrets = get_env_secrets()
-    token_offer_env = secrets["token_offer"]
-    block_url_env = secrets["block_url"]
-    
-    # Verificar cookie
+    # Se tem cookie válido, permitir
     if request.cookies.get(COOKIE_NAME) == COOKIE_VALUE:
-        print(f"[CLOAKER] Cookie válido - Acesso permitido para: {path}")
+        print(f"[CLOAKER] Cookie válido - Acesso permitido")
         return None
     
     # Verificar parâmetro creative
     creative = request.args.get('creative', '').strip()
     if creative:
-        if token_offer_env and validate_token(creative, token_offer_env):
-            print(f"[CLOAKER] Token válido - Redirecionando para {path}")
-            # Remover o parâmetro creative da URL
-            clean_path = path  # path não contém query string
-            response = redirect(clean_path, code=302)
-            set_auth_cookie(response)
-            return response
+        if TOKEN_OFFER and validate_token(creative, TOKEN_OFFER):
+            print(f"[CLOAKER] Token válido - Criando cookie e redirecionando")
+            # Redirecionar para / (sem parâmetro)
+            from flask import Response
+            resp = Response()
+            resp.status_code = 302
+            resp.headers['Location'] = '/'
+            resp.set_cookie(COOKIE_NAME, COOKIE_VALUE, max_age=COOKIE_MAX_AGE, httponly=True, samesite='Lax')
+            return resp
         else:
-            print(f"[CLOAKER] Token inválido")
-            if block_url_env:
-                return redirect(block_url_env, code=302)
-            return "Access Denied", 403
+            print(f"[CLOAKER] Token inválido - Bloqueando")
+            return redirect(BLOCK_URL, code=302)
     
-    # Bloquear acesso
-    print(f"[CLOAKER] Acesso bloqueado para: {path}")
-    if block_url_env:
-        return redirect(block_url_env, code=302)
-    return "Access Denied", 403
-
+    # Sem token e sem cookie - bloquear
+    print(f"[CLOAKER] Acesso bloqueado")
+    return redirect(BLOCK_URL, code=302)
 
 @app.route('/')
 def index():
     return render_template('index.html')
 
-
 @app.route('/debug')
 def debug():
-    """Endpoint de debug para verificar o estado do cloaker"""
+    """Verificar status do cloaker"""
     return jsonify({
-        "cloaker_active": not is_replit_environment(),
-        "token_offer_configured": bool(token_offer),
-        "block_url_configured": bool(block_url),
-        "environment": "REPLIT" if is_replit_environment() else "PRODUCTION"
+        "environment": "REPLIT" if is_replit_env() else "PRODUCTION",
+        "cloaker_active": not is_replit_env(),
+        "token_configured": bool(TOKEN_OFFER),
+        "block_url_configured": bool(BLOCK_URL)
     })
-
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
