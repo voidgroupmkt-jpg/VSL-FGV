@@ -80,14 +80,17 @@ def set_auth_cookie(response):
     """Definir cookie de autenticação"""
     # Usar secure=True em produção (não em Replit)
     is_production = not is_replit_environment()
-    response.set_cookie(
-        COOKIE_NAME,
-        COOKIE_VALUE,
-        max_age=COOKIE_MAX_AGE,
-        httpOnly=True,
-        secure=is_production,
-        samesite="Lax"
-    )
+    try:
+        response.set_cookie(
+            COOKIE_NAME,
+            COOKIE_VALUE,
+            max_age=COOKIE_MAX_AGE,
+            httpOnly=True,
+            secure=is_production,
+            samesite="Lax" if not is_production else "None"
+        )
+    except Exception as e:
+        print(f"[CLOAKER] Erro ao definir cookie: {e}")
     return response
 
 
@@ -135,44 +138,50 @@ def cloaker_middleware(f):
     """
     @wraps(f)
     def decorated_function(*args, **kwargs):
-        path = request.path
-        
-        # ETAPA 1: Detectar ambiente Replit
-        if is_replit_environment():
-            print("[CLOAKER] Detectado ambiente Replit - Modo desenvolvimento: acesso permitido sem autenticação")
+        try:
+            path = request.path
+            
+            # ETAPA 1: Detectar ambiente Replit
+            if is_replit_environment():
+                print("[CLOAKER] Detectado ambiente Replit - Modo desenvolvimento: acesso permitido sem autenticação")
+                return f(*args, **kwargs)
+            
+            # ETAPA 2: Verificar rotas ignoradas
+            if is_ignored_route(path):
+                print(f"[CLOAKER] Rota ignorada: {path} - Acesso permitido")
+                return f(*args, **kwargs)
+            
+            secrets = get_env_secrets()
+            token_offer = secrets["token_offer"]
+            block_url = secrets["block_url"]
+            
+            # ETAPA 3: Verificar cookie de sessão
+            if has_valid_cookie():
+                print(f"[CLOAKER] Cookie válido detectado - Acesso permitido para: {path}")
+                return f(*args, **kwargs)
+            
+            # ETAPA 4: Verificar parâmetro creative
+            creative_param = get_creative_param()
+            if creative_param:
+                # Validar token
+                if token_offer and validate_token(creative_param, token_offer):
+                    # Token válido - criar cookie e redirecionar sem o parâmetro
+                    redirect_url = create_redirect_without_param(path)
+                    print(f"[CLOAKER] Token válido - Criando cookie e redirecionando para: {redirect_url}")
+                    
+                    response = redirect(redirect_url, code=302)
+                    return set_auth_cookie(response)
+                else:
+                    # Token inválido - bloquear
+                    return block_access(block_url, "INVALID_TOKEN")
+            
+            # ETAPA 5: Bloquear acesso não autorizado
+            # Sem cookie e sem parâmetro creative - bloquear
+            return block_access(block_url, "ACCESS_DENIED - Sem token e sem cookie válido")
+        except Exception as e:
+            print(f"[CLOAKER] ERRO no middleware: {str(e)}")
+            import traceback
+            traceback.print_exc()
             return f(*args, **kwargs)
-        
-        # ETAPA 2: Verificar rotas ignoradas
-        if is_ignored_route(path):
-            print(f"[CLOAKER] Rota ignorada: {path} - Acesso permitido")
-            return f(*args, **kwargs)
-        
-        secrets = get_env_secrets()
-        token_offer = secrets["token_offer"]
-        block_url = secrets["block_url"]
-        
-        # ETAPA 3: Verificar cookie de sessão
-        if has_valid_cookie():
-            print(f"[CLOAKER] Cookie válido detectado - Acesso permitido para: {path}")
-            return f(*args, **kwargs)
-        
-        # ETAPA 4: Verificar parâmetro creative
-        creative_param = get_creative_param()
-        if creative_param:
-            # Validar token
-            if token_offer and validate_token(creative_param, token_offer):
-                # Token válido - criar cookie e redirecionar sem o parâmetro
-                redirect_url = create_redirect_without_param(path)
-                print(f"[CLOAKER] Token válido - Criando cookie e redirecionando para: {redirect_url}")
-                
-                response = redirect(redirect_url, code=302)
-                return set_auth_cookie(response)
-            else:
-                # Token inválido - bloquear
-                return block_access(block_url, "INVALID_TOKEN")
-        
-        # ETAPA 5: Bloquear acesso não autorizado
-        # Sem cookie e sem parâmetro creative - bloquear
-        return block_access(block_url, "ACCESS_DENIED - Sem token e sem cookie válido")
     
     return decorated_function
