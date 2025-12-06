@@ -1,0 +1,326 @@
+import { Request, Response, NextFunction } from "express";
+import crypto from "crypto";
+// Tempo de expiração do cookie (3 horas)
+const COOKIE_MAX_AGE = 3 * 60 * 60 * 1000; // 10800 segundos em ms
+const COOKIE_NAME = "creative_session";
+const COOKIE_VALUE = "authorized";
+interface CloakerOptions {
+  tokenOffer?: string;
+  blockUrl?: string;
+  enabled?: boolean;
+}
+/**
+ * Obter secrets do ambiente
+ */
+function getEnvSecrets(): { tokenOffer: string | undefined; blockUrl: string | undefined } {
+  return {
+    tokenOffer: process.env.TOKEN_OFFER,
+    blockUrl: process.env.BLOCK_URL,
+  };
+}
+/**
+ * Verificar se está em ambiente Replit (desenvolvimento)
+ * Desativa o cloaker para facilitar desenvolvimento
+ */
+function isReplitEnvironment(): boolean {
+  return !!(process.env.REPL_ID || process.env.REPL_SLUG);
+}
+/**
+ * Verificar se a rota deve ser ignorada pelo cloaker
+ */
+function isIgnoredRoute(path: string): boolean {
+  const ignoredPrefixes = ["/static/", "/api/", "/assets/", "/fonts/"];
+  const ignoredExact = ["/favicon.ico", "/robots.txt"];
+  for (const prefix of ignoredPrefixes) {
+    if (path.startsWith(prefix)) {
+      return true;
+    }
+  }
+  if (ignoredExact.includes(path)) {
+    return true;
+  }
+  return false;
+}
+/**
+ * Validar token usando comparação segura (timing-safe)
+ */
+function validateToken(providedToken: string, expectedToken: string): boolean {
+  if (!providedToken || !expectedToken) {
+    return false;
+  }
+  // Usar crypto.timingSafeEqual para comparação segura contra timing attacks
+  try {
+    const provided = Buffer.from(String(providedToken), "utf-8");
+    const expected = Buffer.from(String(expectedToken), "utf-8");
+    // Ambos devem ter o mesmo tamanho para timingSafeEqual
+    if (provided.length !== expected.length) {
+      return false;
+    }
+    return crypto.timingSafeEqual(provided, expected);
+  } catch {
+    return false;
+  }
+}
+/**
+ * Extrair parâmetro creative da URL
+ */
+function getCreativeParam(req: Request): string {
+  return (req.query.creative as string)?.trim() || "";
+}
+/**
+ * Verificar se o cookie de sessão é válido
+ */
+function hasValidCookie(req: Request): boolean {
+  return req.cookies[COOKIE_NAME] === COOKIE_VALUE;
+}
+/**
+ * Criar redirecionamento removendo o parâmetro creative da URL
+ */
+function createRedirectWithoutParam(url: string): string {
+  const urlObj = new URL(url, "http://localhost");
+  urlObj.searchParams.delete("creative");
+  return urlObj.pathname + (urlObj.search ? urlObj.search : "");
+}
+/**
+ * Definir cookie de autenticação
+ */
+function setAuthCookie(res: Response): void {
+  const isProduction = process.env.NODE_ENV === "production";
+  res.cookie(COOKIE_NAME, COOKIE_VALUE, {
+    maxAge: COOKIE_MAX_AGE,
+    httpOnly: true,
+    secure: isProduction, // Secure apenas em produção
+    sameSite: "lax", // Permite cookies de sites externos (ex: Facebook Ads, Google Ads)
+  });
+}
+/**
+ * Bloquear acesso redirecionando para BLOCK_URL
+ */
+function blockAccess(res: Response, blockUrl: string | undefined, reason: string): void {
+  if (blockUrl) {
+    console.log(`[CLOAKER] Acesso bloqueado - Motivo: ${reason} - Redirecionando para: ${blockUrl}`);
+    res.redirect(302, blockUrl);
+  } else {
+    console.log(`[CLOAKER] Acesso bloqueado - Motivo: ${reason} - BLOCK_URL não configurada`);
+    res.status(403).send("Access Denied");
+  }
+}
+/**
+ * Middleware de cloaker (Sistema de controle de acesso)
+ * 
+ * FLUXO:
+ * 1. Se Replit (REPL_ID/REPL_SLUG): Acesso livre (desenvolvimento)
+ * 2. Se rota ignorada (/api, /assets, etc): Acesso livre
+ * 3. Se cookie válido: Acesso livre
+ * 4. Se parâmetro creative com token correto: Criar cookie e redirecionar
+ * 5. Se parâmetro creative com token incorreto: Bloquear
+ * 6. Sem cookie e sem parâmetro: Bloquear
+ */
+export function cloakerMiddleware(options: CloakerOptions = {}): (req: Request, res: Response, next: NextFunction) => void {
+  return (req: Request, res: Response, next: NextFunction) => {
+    const path = req.path;
+    // ========================================
+    // ETAPA 1: Detectar ambiente Replit
+    // ========================================
+    // Desativar cloaker apenas no ambiente Replit (desenvolvimento)
+    // Quando publicado, essas variáveis não existem e o cloaker fica ativo
+    if (isReplitEnvironment()) {
+      console.log("[CLOAKER] Detectado ambiente Replit - Modo desenvolvimento: acesso permitido sem autenticação");
+      return next();
+    }
+    // ========================================
+    // ETAPA 2: Verificar rotas ignoradas
+    // ========================================
+    if (isIgnoredRoute(path)) {
+      console.log(`[CLOAKER] Rota ignorada: ${path} - Acesso permitido`);
+      return next();
+    }
+    const { tokenOffer, blockUrl } = options.tokenOffer ? options : getEnvSecrets();
+    // ========================================
+    // ETAPA 3: Verificar cookie de sessão
+    // ========================================
+    if (hasValidCookie(req)) {
+      console.log(`[CLOAKER] Cookie válido detectado - Acesso permitido para: ${path}`);
+      return next();
+    }
+    // ========================================
+    // ETAPA 4: Verificar parâmetro creative
+    // ========================================
+    const creativeParam = getCreativeParam(req);
+    if (creativeParam) {
+      // Validar token
+      if (tokenOffer && validateToken(creativeParam, tokenOffer)) {
+        // Token válido - criar cookie e redirecionar sem o parâmetro
+        setAuthCookie(res);
+        const redirectUrl = createRedirectWithoutParam(req.originalUrl);
+        console.log(`[CLOAKER] Token válido - Criando cookie e redirecionando para: ${redirectUrl}`);
+        return res.redirect(302, redirectUrl);
+      } else {
+        // Token inválido - bloquear
+        return blockAccess(res, blockUrl, "INVALID_TOKEN");
+      }
+    }
+    // ========================================
+    // ETAPA 5: Bloquear acesso não autorizado
+    // ========================================
+    // Sem cookie e sem parâmetro creative - bloquear
+    return blockAccess(res, blockUrl, "ACCESS_DENIED - Sem token e sem cookie válido");
+  };
+}
+/**
+ * Inicializar sistema de cloaker
+ */
+export function initCloaker(tokenOffer?: string, blockUrl?: string): void {
+  const isReplit = isReplitEnvironment();
+  console.log("[CLOAKER] Sistema de cloaker inicializado");
+  if (isReplit) {
+    console.log("[CLOAKER] Ambiente: REPLIT (Desenvolvimento) - Cloaker DESATIVADO para desenvolvimento livre");
+  } else {
+    console.log("[CLOAKER] Ambiente: PRODUÇÃO - Cloaker ATIVO e bloqueando acessos sem autenticação");
+  }
+  if (tokenOffer) {
+    console.log(`[CLOAKER] TOKEN_OFFER configurado: ${tokenOffer.substring(0, 8)}...`);
+  }
+  if (blockUrl) {
+    console.log(`[CLOAKER] BLOCK_URL configurada: ${blockUrl}`);
+  }
+  console.log(`[CLOAKER] Cookie válido por: ${COOKIE_MAX_AGE / 1000}s (3 horas)`);
+}
+
+2️⃣ Atualizar server/app.ts (integração com o cloaker)
+Adicione no início do arquivo (após imports):
+
+import { cloakerMiddleware, initCloaker } from "./middleware/cloaker";
+import cookieParser from "cookie-parser";
+export const app = express();
+// Inicializar cloaker se TOKEN_OFFER ou BLOCK_URL estiverem configurados
+const tokenOffer = process.env.TOKEN_OFFER;
+const blockUrl = process.env.BLOCK_URL;
+if (tokenOffer || blockUrl) {
+  initCloaker(tokenOffer, blockUrl);
+}
+// Middleware para parsing de cookies (DEVE vir ANTES do cloaker)
+app.use(cookieParser());
+// Middleware de cloaker (controle de acesso)
+app.use(cloakerMiddleware({ tokenOffer, blockUrl, enabled: tokenOffer || blockUrl ? true : false }));
+
+3️⃣ Variáveis de Ambiente Necessárias
+Configure no Replit Secrets:
+
+TOKEN_OFFER=seu_token_secreto_aqui
+BLOCK_URL=https://www.gov.br/pt-br
+
+Exemplo de tokens:
+
+TOKEN_OFFER=meta_ads_campaign_2024_secret_token_123456
+TOKEN_OFFER=test_token_secret_123
+
+📋 COMO FUNCIONA O CLOAKER
+FLUXO DE ACESSO:
+┌─────────────────────────────────────────┐
+│    Usuário tenta acessar página         │
+└────────────┬────────────────────────────┘
+             │
+             ▼
+┌─────────────────────────────────────────┐
+│  É ambiente Replit (desenvolvimento)?   │
+│           SIM → Permite                 │
+│           NÃO → Continua                │
+└────────────┬────────────────────────────┘
+             │
+             ▼
+┌─────────────────────────────────────────┐
+│  Rota é ignorada (/api, /assets)?       │
+│           SIM → Permite                 │
+│           NÃO → Continua                │
+└────────────┬────────────────────────────┘
+             │
+             ▼
+┌─────────────────────────────────────────┐
+│  Cookie válido existe?                  │
+│           SIM → Permite                 │
+│           NÃO → Continua                │
+└────────────┬────────────────────────────┘
+             │
+             ▼
+┌─────────────────────────────────────────┐
+│  URL tem parâmetro ?creative=TOKEN?     │
+│           SIM → Valida token            │
+│           NÃO → Bloqueia                │
+└────────────┬────────────────────────────┘
+             │
+        SIM/NÃO
+        /    \
+       ▼      ▼
+    Token   Token
+    válido  inválido
+     │        │
+     ▼        ▼
+  Cria    Bloqueia
+  Cookie  Redirecion
+  &       para
+  Redireciona BLOCK_URL
+
+🚀 COMO IMPLEMENTAR EM SEU PROJETO
+Passo 1: Criar o arquivo middleware
+Crie a pasta server/middleware (se não existir)
+Crie o arquivo server/middleware/cloaker.ts
+Copie o código completo acima
+Passo 2: Integrar em server/app.ts
+Adicione no topo:
+
+import { cloakerMiddleware, initCloaker } from "./middleware/cloaker";
+import cookieParser from "cookie-parser";
+
+E após criar const app = express():
+
+// Inicializar cloaker se TOKEN_OFFER ou BLOCK_URL estiverem configurados
+const tokenOffer = process.env.TOKEN_OFFER;
+const blockUrl = process.env.BLOCK_URL;
+if (tokenOffer || blockUrl) {
+  initCloaker(tokenOffer, blockUrl);
+}
+// Middleware para parsing de cookies (DEVE vir ANTES do cloaker)
+app.use(cookieParser());
+// Middleware de cloaker (controle de acesso)
+app.use(cloakerMiddleware({ tokenOffer, blockUrl, enabled: tokenOffer || blockUrl ? true : false }));
+
+Passo 3: Configurar Secrets
+Vá para Secrets → Add Secret
+TOKEN_OFFER: seu token secreto
+BLOCK_URL: URL para bloquear acesso
+Passo 4: Usar no seu projeto
+A partir de então, o cloaker protegerá automaticamente:
+
+# SEM token (bloqueado)
+https://seu-app.replit.dev/
+# ❌ Bloqueado → Redireciona para BLOCK_URL
+# COM token correto (permite)
+https://seu-app.replit.dev/?creative=seu_token_secreto_aqui
+# ✅ Cria cookie → Redireciona sem o parâmetro
+# ✅ Acesso livre por 3 horas
+# API sempre liberada
+https://seu-app.replit.dev/api/algo
+# ✅ Sempre permite (não requer autenticação)
+
+🔍 RECURSOS DO CLOAKER
+Recurso	Descrição
+Token Timing-Safe	Comparação segura contra timing attacks
+Cookie 3h	Sessão válida por 3 horas
+Rota Ignorada	/api/*, /assets/*, /static/* sempre liberadas
+Ambiente Replit	Desativa automaticamente em desenvolvimento
+Seguro em Produção	Ativa ao publicar
+Redirect Clean	Remove ?creative=TOKEN após validação
+HttpOnly Cookie	Protegido contra XSS
+📊 EXEMPLO DE USO
+URL de Acesso com Token:
+https://seu-app.replit.dev/?creative=seu_token_secreto_aqui_123456
+
+Após autenticação (cookie válido):
+https://seu-app.replit.dev/
+# ✅ Acesso livre durante 3 horas
+
+Sem token (bloqueado):
+https://seu-app.replit.dev/
+# ❌ Redireciona para https://www.gov.br/pt-br
+
