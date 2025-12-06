@@ -46,7 +46,9 @@ def apply_cloaker():
     if creative:
         if token_offer_env and validate_token(creative, token_offer_env):
             print(f"[CLOAKER] Token válido - Redirecionando para {path}")
-            response = redirect(path, code=302)
+            # Remover o parâmetro creative da URL
+            clean_path = path  # path não contém query string
+            response = redirect(clean_path, code=302)
             set_auth_cookie(response)
             return response
         else:
