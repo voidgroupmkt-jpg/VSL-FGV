@@ -78,12 +78,14 @@ def create_redirect_without_param(path):
 
 def set_auth_cookie(response):
     """Definir cookie de autenticação"""
+    # Usar secure=True em produção (não em Replit)
+    is_production = not is_replit_environment()
     response.set_cookie(
         COOKIE_NAME,
         COOKIE_VALUE,
         max_age=COOKIE_MAX_AGE,
         httpOnly=True,
-        secure=os.environ.get("FLASK_ENV") == "production",
+        secure=is_production,
         samesite="Lax"
     )
     return response
